@@ -10,12 +10,12 @@
 
 #include "chrono.c"
 
-#define DEBUG 1
+#define DEBUG 0
 
-#define NTIMES 1 // Numero de vezes que as buscas serao feitas
+#define NTIMES (long long)10 // Numero de vezes que as buscas serao feitas
 #define MAX_THREADS 8 // Numero maximo de threads
-#define MAX_TOTAL_ELEMENTS (int)16e6 // Tam max do vetor de input
-#define NP 5 // Tamanho do vetor p
+#define MAX_TOTAL_ELEMENTS (long long)16e6 // Tam max do vetor de input
+#define NP 100000 // Tamanho do vetor p
 
 long long InputG[NTIMES * MAX_TOTAL_ELEMENTS];
 long long OutputG[NTIMES * MAX_TOTAL_ELEMENTS];
@@ -24,6 +24,20 @@ int PosG[NTIMES * NP];
 
 int nThreads;       // numero efetivo de threads
 int nTotalElements; // numero total de elementos
+
+bool initialized = false;
+
+typedef struct {
+    int start, end;
+    long long *Input, *P;
+    int *partition_size, *partition_of;
+    int np, myIndex;
+} thread_args_t;
+
+pthread_t Thread[MAX_THREADS];
+int Thread_id[MAX_THREADS];
+pthread_barrier_t bsearch_barrier;
+thread_args_t thread_args[MAX_THREADS];
 
 int compare(const void *a, const void *b) {
     const long long int_a = *(const long long *)a;
@@ -36,6 +50,24 @@ int compare(const void *a, const void *b) {
     else
         return 0;
 }
+
+// retorna indice do primeiro elemento estritamente MAIOR que x
+int upper_bound(long long x, long long *v, int n) {
+    int first = 0, last = n - 1, ans = -1; 
+    while (first <= last) {
+        int m = first + (last - first) / 2;
+
+        if (v[m] > x) {
+            ans = m;
+            last = m - 1;
+        } else {
+            first = m + 1;
+        }
+    }
+
+    return ans;
+}
+
 
 long long geraAleatorioLL() {
     int a = rand();  // Returns a pseudo-random integer
@@ -52,7 +84,7 @@ void verifica_particoes( long long *Input, int n, long long *P, int np, long lon
         
         printf("\nOut = ");
         for (int i = 0; i < n; i++) printf("%lld ", Output[i]);
-        printf("\n");
+        printf("\n\n");
     }
 
     for (int i = 0; i < np; i++) {
@@ -70,7 +102,7 @@ void verifica_particoes( long long *Input, int n, long long *P, int np, long lon
         for(int j = start; j < end; j++) {
             if ((Output[j] < lim_inf) || (Output[j] >= lim_sup)) {
                 printf("===> particionamento COM ERROS\n");
-                printf("%lld na particao de [%lld, %lld)\n\n", Output[i], lim_inf, lim_sup);
+                printf("%lld na particao de [%lld, %lld)\n\n", Output[j], lim_inf, lim_sup);
                 return;
             }
         }
@@ -79,9 +111,97 @@ void verifica_particoes( long long *Input, int n, long long *P, int np, long lon
     return;
 }
 
+void *find_partitions(void *ptr) {
+    thread_args_t args = *(thread_args_t*)ptr;
+
+    while (true) {
+        pthread_barrier_wait(&bsearch_barrier);       
+
+        for (int i = args.start; i <= args.end; i++) {
+            int partition = upper_bound(args.Input[i], args.P, args.np);
+            args.partition_size[partition]++;
+            args.partition_of[i] = partition;
+        }
+
+        pthread_barrier_wait(&bsearch_barrier);       
+
+        if (args.myIndex == 0)
+            return NULL;
+    }
+
+}
+
 
 void multi_partition( long long *Input, int n, long long *P, int np, long long *Output, int *Pos ) {
-    printf("=== Multi Partition ===\n\n");
+    int partition_of[n];
+
+    if (!initialized) {
+
+        // initialize thread args
+        int chunk_size = (n + nThreads - 1) / nThreads;
+        for (int i = 0; i < nThreads; i++) {
+            thread_args[i].myIndex = i;
+            thread_args[i].Input = Input;
+            thread_args[i].P = P;
+            thread_args[i].np = np;
+            thread_args[i].start = i * chunk_size;
+            thread_args[i].end = (i + 1) * chunk_size - 1;
+            thread_args[i].partition_of = partition_of; 
+            thread_args[i].partition_size = (int*) malloc(np * sizeof(int)); 
+
+            if (thread_args[i].end >= n) {
+                thread_args[i].end = n-1;
+            }
+            
+            if (DEBUG)
+                printf("Thread %d vai processar de %d até %d\n", i, thread_args[i].start, thread_args[i].end);
+        }
+
+        // intialize threads
+        if (pthread_barrier_init(&bsearch_barrier, NULL, nThreads) != 0) {
+            perror("pthread_barrier_init");
+            exit(EXIT_FAILURE);
+        }
+
+        // cria todas as outra threads trabalhadoras
+        for (int i = 1; i < nThreads; i++) {
+            if (pthread_create(&Thread[i], NULL, find_partitions, &thread_args[i]) != 0) {
+                perror("pthread_create");
+                exit(EXIT_FAILURE);
+            }
+        }
+        initialized = true;
+    }
+
+    for (int i = 0; i < nThreads; i++) {
+        memset(thread_args[i].partition_size, 0, np*sizeof(int)); 
+    }
+
+    find_partitions(&thread_args[0]);
+
+    // calcular tamanho total das particoes
+    int partition_size[np];
+    memset(partition_size, 0, (np * sizeof(int)));
+    for (int i = 0; i < nThreads; i++)
+        for (int j = 0; j < np; j++)
+            partition_size[j] += thread_args[i].partition_size[j];
+
+    // calcular indice de inicio de cada particao em Output
+    int start_index[np]; 
+    memset(start_index, 0, (np * sizeof(int)));
+    for (int i = 1; i < np; i++) 
+        start_index[i] += start_index[i - 1] + partition_size[i - 1];
+
+    // os indices de inicio sao o vetor Pos 
+    memcpy(Pos, start_index, sizeof(start_index));
+
+    // montar output
+    for (int i = 0; i < n; i++) {
+        int partition = partition_of[i];
+        Output[start_index[partition]] = Input[i];
+        start_index[partition]++;
+    } 
+
     return;
 }
         
@@ -107,7 +227,7 @@ int main(int argc, char *argv[]) {
         nTotalElements = atoi(argv[1]);
         if (nTotalElements > MAX_TOTAL_ELEMENTS) {
             printf("usage: %s <nTotalElements> <nThreads>\n", argv[0]);
-            printf("<nTotalElements> must be up to %d\n", MAX_TOTAL_ELEMENTS);
+            printf("<nTotalElements> must be up to %lld\n", MAX_TOTAL_ELEMENTS);
             return 0;
         }
     }
@@ -142,10 +262,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (DEBUG) {
-        printf("InputG: ");
-        for (int i = 0; i < NTIMES * nTotalElements; i++) printf("%lld ", InputG[i]);
-        printf("\n\nPG: ");
-        for (int i = 0; i < NTIMES * NP; i++) printf("%lld ", PG[i]);
+        printf("Input: ");
+        for (int i = 0; i < nTotalElements; i++) printf("%lld ", InputG[i]);
+        printf("\n\nP: ");
+        for (int i = 0; i < NP; i++) printf("%lld ", PG[i]);
         printf("\n\n");
     }
 
@@ -157,6 +277,7 @@ int main(int argc, char *argv[]) {
     int *Pos;
 
     for (int i = 0; i < NTIMES; i++) {
+        printf("\n\n==== TIME %d ====\n\n", i);
         Input = &InputG[io_start];
         Output = &OutputG[io_start];
         P = &PG[p_start];
