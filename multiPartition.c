@@ -17,10 +17,22 @@
 #define MAX_TOTAL_ELEMENTS (long long)16e6 // Tam max do vetor de input
 #define NP 100000 // Tamanho do vetor p
 
-long long InputG[NTIMES * MAX_TOTAL_ELEMENTS];
-long long OutputG[NTIMES * MAX_TOTAL_ELEMENTS];
-long long PG[NTIMES * NP];
-int PosG[NTIMES * NP];
+// considerando L2 em W00 = 24MiB
+#define cache_offset_ll (long long) 4e6 // tamanho de um vetor de long long que enche a cache
+#define cache_offset_int (long long) 7e6 // tamanho de um vetor de int que enche a cache
+
+// Esses vetores precisam ser 'tirados' da cache a cada chamada de multi_partition
+// eles terao o formato: copia1, offset do tamanho da cache, copia2
+// alternamos entre copia1 e copia2 a cada chamada da func para desacartar a cache
+long long InputG[(2 * MAX_TOTAL_ELEMENTS) + cache_offset_ll];
+long long OutputG[(2 * MAX_TOTAL_ELEMENTS) + cache_offset_ll];
+long long PG[(2 * NP) + cache_offset_ll];
+int PosG[(2 * NP) + cache_offset_int];
+
+// indices de inicio da copia2
+int copia2_start_index_Input = MAX_TOTAL_ELEMENTS + cache_offset_ll;
+int copia2_start_index_P = NP + cache_offset_ll; 
+int copia2_start_index_Pos = NP + cache_offset_int; 
 
 int nThreads;       // numero efetivo de threads
 int nTotalElements; // numero total de elementos
@@ -112,20 +124,20 @@ void verifica_particoes( long long *Input, int n, long long *P, int np, long lon
 }
 
 void *find_partitions(void *ptr) {
-    thread_args_t args = *(thread_args_t*)ptr;
+    thread_args_t *args = (thread_args_t*)ptr;
 
     while (true) {
         pthread_barrier_wait(&bsearch_barrier);       
 
-        for (int i = args.start; i <= args.end; i++) {
-            int partition = upper_bound(args.Input[i], args.P, args.np);
-            args.partition_size[partition]++;
-            args.partition_of[i] = partition;
+        for (int i = args->start; i <= args->end; i++) {
+            int partition = upper_bound(args->Input[i], args->P, args->np);
+            args->partition_size[partition]++;
+            args->partition_of[i] = partition;
         }
 
         pthread_barrier_wait(&bsearch_barrier);       
 
-        if (args.myIndex == 0)
+        if (args->myIndex == 0)
             return NULL;
     }
 
@@ -133,7 +145,7 @@ void *find_partitions(void *ptr) {
 
 
 void multi_partition( long long *Input, int n, long long *P, int np, long long *Output, int *Pos ) {
-    int partition_of[n];
+    int *partition_of = (int*)malloc(n * sizeof(int));
 
     if (!initialized) {
 
@@ -175,10 +187,11 @@ void multi_partition( long long *Input, int n, long long *P, int np, long long *
 
     for (int i = 0; i < nThreads; i++) {
         memset(thread_args[i].partition_size, 0, np*sizeof(int)); 
+        thread_args[i].partition_of = partition_of;
     }
 
     find_partitions(&thread_args[0]);
-
+    
     // calcular tamanho total das particoes
     int partition_size[np];
     memset(partition_size, 0, (np * sizeof(int)));
@@ -202,6 +215,7 @@ void multi_partition( long long *Input, int n, long long *P, int np, long long *
         start_index[partition]++;
     } 
 
+    free(partition_of);
     return;
 }
         
@@ -238,11 +252,11 @@ int main(int argc, char *argv[]) {
 
     printf("Initializing Input vector...\n\n");
 
+    // Popular InputG com numeros aleatorios
     for (int i = 0; i < nTotalElements; i++) {
         long long num = geraAleatorioLL();
-        for (int j = 0; j < NTIMES; j++) {
-            InputG[i + (j*nTotalElements)] = num;
-        }
+        InputG[i] = num;
+        InputG[copia2_start_index_Input + i] = num;
     }
 
     // Popular PG com NP elementos aleatorios
@@ -254,11 +268,9 @@ int main(int argc, char *argv[]) {
     // Ordenar
     qsort(PG, NP, sizeof(long long), compare);
 
-    // Criar copias concatenadas para evitar efeitos de cache
-    for (int i = 1; i < NTIMES; i++) {
-        for (int j = 0; j < NP; j++) {
-            PG[(i*NP) + j] = PG[j];
-        }
+    // Criar copia2
+    for (int i = 0; i < NP; i++) {
+        PG[copia2_start_index_P + i] = PG[i];
     }
 
     if (DEBUG) {
@@ -272,35 +284,46 @@ int main(int argc, char *argv[]) {
     chrono_reset(&chrono_time);
     chrono_start(&chrono_time);
 
-    int p_start = 0, io_start = 0;
+    int p_start = 0, input_start = 0, pos_start = 0;
+    int copia1_ou_2 = 0;
     long long *Input, *P, *Output;
     int *Pos;
 
     for (int i = 0; i < NTIMES; i++) {
-        printf("\n\n==== TIME %d ====\n\n", i);
-        Input = &InputG[io_start];
-        Output = &OutputG[io_start];
+        printf("\n\n==== CALL %d ====\n\n", i);
+
+        Input = &InputG[input_start];
+        Output = &OutputG[input_start];
         P = &PG[p_start];
         Pos = &PosG[p_start];
 
-                
-        multi_partition(Input, nTotalElements, P, NP, Output, Pos );
-        verifica_particoes(Input, nTotalElements, P, NP, Output, Pos );
+        // Initialize chronometer for this call
+        chronometer_t local_chrono;
+        chrono_reset(&local_chrono);
 
-        io_start += nTotalElements;
-        p_start += NP;
+        // Measure time for multi_partition
+        chrono_start(&local_chrono);
+        multi_partition(Input, nTotalElements, P, NP, Output, Pos);
+        verifica_particoes(Input, nTotalElements, P, NP, Output, Pos);
+        chrono_stop(&local_chrono);
+
+        // Report time for this call
+        long long call_time_ns = chrono_gettotal(&local_chrono);
+        printf("Call %d: %lfs\n", i, call_time_ns / 1e9);
+
+        input_start = copia1_ou_2 * copia2_start_index_Input;
+        p_start = copia1_ou_2 * copia2_start_index_P;
+        pos_start = copia1_ou_2 * copia2_start_index_Pos;
+
+        // trocar copia
+        copia1_ou_2 ^= 1;
     }
 
-    // COMO CALCULAR ESSSE TEMPO?
-    // AQUI ELE ESTA CALCULANDO O TEMPO TOTAL PARA RODAR NTIMES
-    // TEM QUE REPORTAR O TEMPO PARA CADA UMA OU A MEDIA??  
-    // calcular e imprimir a VAZAO (numero de operacoes/s)
+    // Print average time for all calls
     chrono_stop(&chrono_time);
-
-
-    double total_time_in_seconds = (double)chrono_gettotal(&chrono_time) /
-                                   ((double)1000 * 1000 * 1000);
-    printf("total_time_in_seconds: %lf s\n", total_time_in_seconds);
+    double total_time_in_seconds = (double)chrono_gettotal(&chrono_time) / ((double)1000 * 1000 * 1000);
+    printf("\n\nTotal Time: %lfs\n", total_time_in_seconds);
+    printf("Average Time Per Call: %lfs\n", total_time_in_seconds / NTIMES);
 
     return 0; 
 }
