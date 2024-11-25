@@ -9,6 +9,7 @@
 #include <limits.h>
 
 #include "chrono.c"
+#include "verifica_particoes.c"
 
 #define DEBUG 0
 
@@ -22,8 +23,8 @@
 #define cache_offset_int (long long) 7e6 // tamanho de um vetor de int que enche a cache
 
 // Esses vetores precisam ser 'tirados' da cache a cada chamada de multi_partition
-// eles terao o formato: copia1, offset do tamanho da cache, copia2
-// alternamos entre copia1 e copia2 a cada chamada da func para desacartar a cache
+// eles terao o formato: [copia1, offset do tamanho da cache, copia2]
+// alternamos entre copia1 e copia2 a cada chamada da func para descartar a cache
 long long InputG[(2 * MAX_TOTAL_ELEMENTS) + cache_offset_ll];
 long long OutputG[(2 * MAX_TOTAL_ELEMENTS) + cache_offset_ll];
 long long PG[(2 * NP) + cache_offset_ll];
@@ -87,40 +88,6 @@ long long geraAleatorioLL() {
     int b = rand();  // same as above
     long long v = (long long)a * 100 + b;
     return v%100;
-}
-
-void verifica_particoes( long long *Input, int n, long long *P, int np, long long *Output, int *Pos ) {
-    if (DEBUG) {
-        printf("Pos = ");
-        for (int i = 0; i < np; i++) printf("%d ", Pos[i]);
-        
-        printf("\nOut = ");
-        for (int i = 0; i < n; i++) printf("%lld ", Output[i]);
-        printf("\n\n");
-    }
-
-    for (int i = 0; i < np; i++) {
-        long long lim_inf = i > 0 ? P[i-1] : 0; 
-        long long lim_sup = P[i]; 
-
-
-        int start = Pos[i];
-        int end = i < np - 1 ? Pos[i+1] : n;
-
-        // Nao tem nenhum numero no intervalo
-        if (start == end) continue;
-
-        // j E [start, end) => Output[j] E [lim_inf, lim_sup)
-        for(int j = start; j < end; j++) {
-            if ((Output[j] < lim_inf) || (Output[j] >= lim_sup)) {
-                printf("===> particionamento COM ERROS\n");
-                printf("%lld na particao de [%lld, %lld)\n\n", Output[j], lim_inf, lim_sup);
-                return;
-            }
-        }
-    }
-    printf("===> particionamento CORRETO\n\n");
-    return;
 }
 
 void *find_partitions(void *ptr) {
@@ -290,26 +257,14 @@ int main(int argc, char *argv[]) {
     int *Pos;
 
     for (int i = 0; i < NTIMES; i++) {
-        printf("\n\n==== CALL %d ====\n\n", i);
+        printf("\n==== CALL %d ====\n\n", i);
 
         Input = &InputG[input_start];
         Output = &OutputG[input_start];
         P = &PG[p_start];
         Pos = &PosG[p_start];
 
-        // Initialize chronometer for this call
-        chronometer_t local_chrono;
-        chrono_reset(&local_chrono);
-
-        // Measure time for multi_partition
-        chrono_start(&local_chrono);
         multi_partition(Input, nTotalElements, P, NP, Output, Pos);
-        verifica_particoes(Input, nTotalElements, P, NP, Output, Pos);
-        chrono_stop(&local_chrono);
-
-        // Report time for this call
-        long long call_time_ns = chrono_gettotal(&local_chrono);
-        printf("Call %d: %lfs\n", i, call_time_ns / 1e9);
 
         input_start = copia1_ou_2 * copia2_start_index_Input;
         p_start = copia1_ou_2 * copia2_start_index_P;
@@ -322,8 +277,12 @@ int main(int argc, char *argv[]) {
     // Print average time for all calls
     chrono_stop(&chrono_time);
     double total_time_in_seconds = (double)chrono_gettotal(&chrono_time) / ((double)1000 * 1000 * 1000);
-    printf("\n\nTotal Time: %lfs\n", total_time_in_seconds);
+
+    verifica_particoes(Input, nTotalElements, P, NP, Output, Pos);
+
+    printf("\nTotal Time: %lfs\n", total_time_in_seconds);
     printf("Average Time Per Call: %lfs\n", total_time_in_seconds / NTIMES);
+    printf("Throughput: %.2lfMEPS/s\n", NTIMES * nTotalElements / (total_time_in_seconds * 1e6));
 
     return 0; 
 }
